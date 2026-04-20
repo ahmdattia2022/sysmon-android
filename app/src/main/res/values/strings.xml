@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Sysmon</string>
+    <string name="service_notification_channel">Router polling</string>
+    <string name="service_notification_title">Monitoring router</string>
+    <string name="service_notification_text">Polling every minute</string>
+    <string name="alerts_channel">Alerts</string>
+</resources>

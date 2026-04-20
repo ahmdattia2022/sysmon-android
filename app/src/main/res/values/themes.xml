@@ -1,0 +1,13 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!--
+        Material 3 DayNight parent — lets the OS flip light/dark before Compose
+        sets its own colors, preventing a flash of the wrong background on start.
+        Compose's SysmonTheme owns the actual palette (including Material You).
+    -->
+    <style name="Theme.Sysmon" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="m">true</item>
+        <item name="android:enforceNavigationBarContrast" tools:targetApi="q">false</item>
+    </style>
+</resources>

@@ -1,0 +1,36 @@
+# ---- Build artefacts -------------------------------------------------------
+/build/
+/app/build/
+/.gradle/
+/captures/
+/out/
+
+# ---- IDE files -------------------------------------------------------------
+/.idea/
+/.vscode/
+/.fleet/
+*.iml
+.kotlin/
+
+# ---- Local configuration ---------------------------------------------------
+# Never commit — contains absolute SDK path + sometimes NDK + user-specific flags.
+local.properties
+
+# ---- Signing secrets -------------------------------------------------------
+# Never commit app-signing material.
+*.keystore
+*.jks
+keystore.properties
+signing.properties
+/app/release/
+
+# ---- KSP / generated -------------------------------------------------------
+/app/src/generated/
+
+# ---- OS junk ---------------------------------------------------------------
+.DS_Store
+Thumbs.db
+
+# ---- Logs ------------------------------------------------------------------
+*.log
+hs_err_pid*
