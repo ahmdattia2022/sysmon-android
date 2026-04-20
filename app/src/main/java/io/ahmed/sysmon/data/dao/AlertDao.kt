@@ -20,6 +20,15 @@ interface AlertDao {
     @Query("SELECT * FROM alerts WHERE reason = :reason ORDER BY ts DESC LIMIT 1")
     suspend fun lastByReason(reason: String): AlertEntity?
 
+    /** Latest alert of a given reason whose error field contains the needle — used
+     *  to cool-down per-device alerts without collapsing them across MACs. */
+    @Query("""
+        SELECT * FROM alerts
+        WHERE reason = :reason AND error LIKE '%' || :errorContains || '%'
+        ORDER BY ts DESC LIMIT 1
+    """)
+    suspend fun lastByReasonWithError(reason: String, errorContains: String): AlertEntity?
+
     @Query("SELECT * FROM alerts WHERE ts LIKE :dayPrefix || '%' ORDER BY ts")
     suspend fun forDay(dayPrefix: String): List<AlertEntity>
 }

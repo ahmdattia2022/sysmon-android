@@ -272,18 +272,20 @@ class RouterPollService : Service() {
             ))
         }
 
-        // Upsert devices + mark anyone not seen as offline
+        // Upsert devices + mark anyone not seen as offline. We touch ONLY the
+        // router-authoritative fields (hostname/lastIp/lastSeen/isOnline) so a
+        // user-assigned label/group/budget doesn't get clobbered every minute.
         val seenMacs = snap.devices.map { it.mac }
         for (d in snap.devices) {
             val existing = repo.devices.byMac(d.mac)
-            repo.upsertDevice(DeviceEntity(
+            repo.upsertRouterFields(
                 mac = d.mac,
                 hostname = d.hostname.ifBlank { existing?.hostname },
                 lastIp = d.ip.ifBlank { existing?.lastIp },
                 firstSeen = existing?.firstSeen ?: snap.ts,
                 lastSeen = snap.ts,
                 isOnline = 1
-            ))
+            )
         }
         if (seenMacs.isNotEmpty()) repo.markDevicesOfflineExcept(seenMacs)
 

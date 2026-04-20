@@ -26,6 +26,32 @@ class Repository(context: Context) {
     suspend fun insertSample(s: UsageSampleEntity) = usage.insert(s)
     suspend fun upsertDevice(d: DeviceEntity) = devices.upsert(d)
     suspend fun markDevicesOfflineExcept(seen: List<String>) = devices.markOfflineExcept(seen)
+
+    /**
+     * Poll-loop-safe upsert: if the device already exists, only router-sourced
+     * fields are refreshed — user-editable fields (label, group, iconKind,
+     * budgets) are never touched. If the device is new, a full insert happens.
+     */
+    suspend fun upsertRouterFields(
+        mac: String, hostname: String?, lastIp: String?,
+        firstSeen: String, lastSeen: String, isOnline: Int
+    ) {
+        val updated = devices.updateRouterFields(mac, hostname, lastIp, lastSeen, isOnline)
+        if (updated == 0) {
+            devices.upsert(DeviceEntity(
+                mac = mac, hostname = hostname, lastIp = lastIp,
+                firstSeen = firstSeen, lastSeen = lastSeen, isOnline = isOnline
+            ))
+        }
+    }
+
+    /** Save only the user-editable fields. No side effects on router state. */
+    suspend fun saveDeviceEdits(
+        mac: String, label: String?, group: String?, iconKind: String?,
+        dailyBudgetMb: Int?, monthlyBudgetMb: Int?
+    ) {
+        devices.updateUserFields(mac, label, group, iconKind, dailyBudgetMb, monthlyBudgetMb)
+    }
     suspend fun insertAlert(a: AlertEntity) = alerts.insert(a)
     suspend fun upsertJob(j: JobEntity) = jobs.upsert(j)
     suspend fun latestSample(source: String) = usage.latest(source)

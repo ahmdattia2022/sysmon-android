@@ -2,8 +2,10 @@ package io.ahmed.sysmon.ui.screens
 
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -25,12 +27,16 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.ahmed.sysmon.data.entity.DeviceEntity
 import io.ahmed.sysmon.repo.Repository
 import io.ahmed.sysmon.service.RouterPollService
+import io.ahmed.sysmon.ui.components.DeviceEditSheet
+import io.ahmed.sysmon.ui.components.DeviceIconKind
 import io.ahmed.sysmon.util.Format
 import io.ahmed.sysmon.util.rememberToday
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun DevicesScreen(onOpenDevice: (String) -> Unit = {}) {
     val context = LocalContext.current
@@ -39,16 +45,19 @@ fun DevicesScreen(onOpenDevice: (String) -> Unit = {}) {
 
     val devices by repo.devices.observeAll().collectAsStateWithLifecycle(emptyList())
 
-    // rememberToday() flips at midnight — flows re-subscribe with fresh dayPrefix.
     val today = rememberToday()
     val todayKey = remember(today) { today.toString() }
     val perDevice by repo.deviceUsage.todaysPerDeviceFlow(todayKey)
         .collectAsStateWithLifecycle(emptyList())
+    val gapMbToday by repo.deviceUsage.todaysGapMbFlow(todayKey)
+        .collectAsStateWithLifecycle(0.0)
     val usageByMac = perDevice.associate { it.mac to it.total }
 
     val online = devices.count { it.isOnline == 1 }
 
     var isRefreshing by remember { mutableStateOf(false) }
+    var groupView by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<DeviceEntity?>(null) }
 
     PullToRefreshBox(
         isRefreshing = isRefreshing,
@@ -63,19 +72,35 @@ fun DevicesScreen(onOpenDevice: (String) -> Unit = {}) {
         modifier = Modifier.fillMaxSize()
     ) {
         Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp)) {
-            Text("Devices", style = MaterialTheme.typography.headlineMedium,
-                 fontWeight = FontWeight.Bold)
-            Text("$online online · ${devices.size} total",
-                 style = MaterialTheme.typography.labelMedium,
-                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Devices", style = MaterialTheme.typography.headlineMedium,
+                         fontWeight = FontWeight.Bold)
+                    Text("$online online · ${devices.size} total",
+                         style = MaterialTheme.typography.labelMedium,
+                         color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                FilterChip(
+                    selected = groupView,
+                    onClick = { groupView = !groupView },
+                    label = { Text(if (groupView) "Grouped" else "Flat") }
+                )
+            }
             Spacer(Modifier.height(4.dp))
             Text(
-                "Per-device totals are estimated from Wi-Fi activity — the router doesn't " +
-                    "expose exact per-host counters. Wired devices (TV, PC, console) aren't " +
-                    "tracked individually, so their traffic is spread across the Wi-Fi devices.",
+                "Long-press a device to rename it, set a budget, or pick an icon. " +
+                    "Per-device totals are Wi-Fi estimates — wired traffic isn't tracked per host.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            if (gapMbToday > 0) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Offline window today: ${Format.mb(gapMbToday)} not attributed to any device.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary
+                )
+            }
             Spacer(Modifier.height(12.dp))
 
             if (devices.isEmpty()) {
@@ -86,13 +111,12 @@ fun DevicesScreen(onOpenDevice: (String) -> Unit = {}) {
                     )
                 ) {
                     Text(
-                        "No devices yet. Discovery runs on every poll — pull down to refresh or check back in ~60 s.",
+                        "No devices yet. Discovery runs on every poll — pull down to refresh.",
                         modifier = Modifier.padding(16.dp),
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             } else {
-                // Sort: online first, then by today usage desc
                 val sorted = devices.sortedWith(
                     compareByDescending<DeviceEntity> { it.isOnline }
                         .thenByDescending { usageByMac[it.mac] ?: 0.0 }
@@ -101,36 +125,84 @@ fun DevicesScreen(onOpenDevice: (String) -> Unit = {}) {
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     contentPadding = PaddingValues(bottom = 24.dp)
                 ) {
-                    items(sorted, key = { it.mac }) { d ->
-                        DeviceCard(
-                            d,
-                            todayMb = usageByMac[d.mac],
-                            onClick = { onOpenDevice(d.mac) },
-                            modifier = Modifier.animateItem(
-                                fadeInSpec = tween(200),
-                                placementSpec = tween(250),
-                                fadeOutSpec = tween(160)
+                    if (groupView) {
+                        val grouped = sorted.groupBy { it.group?.takeIf { g -> g.isNotBlank() } ?: "Ungrouped" }
+                            .toSortedMap(compareBy { if (it == "Ungrouped") "zzz" else it })
+                        for ((g, items) in grouped) {
+                            item(key = "hdr_$g") {
+                                Text(
+                                    "$g · ${items.size}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 8.dp, bottom = 2.dp)
+                                )
+                            }
+                            items(items, key = { it.mac }) { d ->
+                                DeviceCard(
+                                    d,
+                                    todayMb = usageByMac[d.mac],
+                                    onClick = { onOpenDevice(d.mac) },
+                                    onLongClick = { editing = d },
+                                    modifier = Modifier.animateItem(
+                                        fadeInSpec = tween(200),
+                                        placementSpec = tween(250),
+                                        fadeOutSpec = tween(160)
+                                    )
+                                )
+                            }
+                        }
+                    } else {
+                        items(sorted, key = { it.mac }) { d ->
+                            DeviceCard(
+                                d,
+                                todayMb = usageByMac[d.mac],
+                                onClick = { onOpenDevice(d.mac) },
+                                onLongClick = { editing = d },
+                                modifier = Modifier.animateItem(
+                                    fadeInSpec = tween(200),
+                                    placementSpec = tween(250),
+                                    fadeOutSpec = tween(160)
+                                )
                             )
-                        )
+                        }
                     }
                 }
             }
         }
     }
+
+    editing?.let { dev ->
+        DeviceEditSheet(
+            device = dev,
+            onDismiss = { editing = null },
+            onSave = { label, group, iconKind, dailyBudgetMb, monthlyBudgetMb ->
+                withContext(Dispatchers.IO) {
+                    repo.saveDeviceEdits(dev.mac, label, group, iconKind, dailyBudgetMb, monthlyBudgetMb)
+                }
+            }
+        )
+    }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DeviceCard(
     d: DeviceEntity,
     todayMb: Double?,
     onClick: () -> Unit = {},
+    onLongClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val dot = if (d.isOnline == 1) Color(0xFF2CA02C) else Color(0xFF888888)
+    val displayName = d.label?.takeIf { it.isNotBlank() }
+        ?: d.hostname?.takeIf { it.isNotBlank() }
+        ?: "(unknown)"
+    val kind = DeviceIconKind.fromKeyOrDefault(d.iconKind)
+
     Card(
         modifier = modifier
             .fillMaxWidth()
-            .clickable { onClick() }
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .animateContentSize(),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
@@ -142,12 +214,12 @@ private fun DeviceCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Icon(Icons.Filled.Router, null,
+            Icon(kind.icon, null,
                  tint = MaterialTheme.colorScheme.onSurfaceVariant,
                  modifier = Modifier.size(28.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(d.hostname?.takeIf { it.isNotBlank() } ?: "(unknown)",
+                    Text(displayName,
                          style = MaterialTheme.typography.titleSmall,
                          fontWeight = FontWeight.SemiBold,
                          modifier = Modifier.weight(1f))
@@ -158,6 +230,11 @@ private fun DeviceCard(
                             .background(dot)
                     )
                 }
+                if (!d.group.isNullOrBlank()) {
+                    Text(d.group,
+                         style = MaterialTheme.typography.labelSmall,
+                         color = MaterialTheme.colorScheme.primary)
+                }
                 Text("IP ${d.lastIp ?: "—"}",
                      style = MaterialTheme.typography.bodySmall,
                      color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -167,6 +244,25 @@ private fun DeviceCard(
                 Text("last seen ${Format.ago(d.lastSeen)}",
                      style = MaterialTheme.typography.labelSmall,
                      color = MaterialTheme.colorScheme.onSurfaceVariant)
+                d.dailyBudgetMb?.let { cap ->
+                    val used = todayMb ?: 0.0
+                    val pct = (used / cap).coerceAtMost(1.0).toFloat()
+                    val over = used > cap
+                    Spacer(Modifier.height(4.dp))
+                    LinearProgressIndicator(
+                        progress = { pct },
+                        color = if (over) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.outlineVariant,
+                        modifier = Modifier.fillMaxWidth().height(4.dp)
+                    )
+                    Text(
+                        "${Format.mb(used)} / $cap MB daily",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (over) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             Column(horizontalAlignment = Alignment.End) {
                 Text("today",

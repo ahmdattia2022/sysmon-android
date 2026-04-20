@@ -19,7 +19,8 @@ class AnomalyEvaluator(private val context: Context, private val repo: Repositor
         "OVER_DAILY_BUDGET" to 60L,
         "ROUTER_HIGH_HOURLY" to 60L,
         "ROUTER_OVER_DAILY" to 60L,
-        "ROUTER_NEW_DEVICE" to 24 * 60L
+        "ROUTER_NEW_DEVICE" to 24 * 60L,
+        "DEVICE_DAILY_EXCEEDED" to 6 * 60L  // once per 6h per device
     )
 
     suspend fun evaluateAll(): List<String> {
@@ -66,6 +67,35 @@ class AnomalyEvaluator(private val context: Context, private val repo: Repositor
 
         for (dev in repo.devices.newToday(dayPrefix)) {
             maybeFire("ROUTER_NEW_DEVICE", 0.0, "${dev.hostname ?: "?"}|${dev.mac}")
+        }
+
+        // Per-device daily budget. Cooldown is per-MAC so firing for one device
+        // doesn't silence another.
+        val allDevices = repo.devices.getAll()
+        for (dev in allDevices) {
+            val cap = dev.dailyBudgetMb ?: continue
+            val usedMb = repo.deviceUsage.mbOnDay(dev.mac, dayPrefix)
+            if (usedMb > cap) {
+                val recent = repo.alerts.lastByReasonWithError("DEVICE_DAILY_EXCEEDED", dev.mac)
+                val recentTs = recent?.ts?.let { runCatching { LocalDateTime.parse(it) }.getOrNull() }
+                val minutesSince = recentTs?.let {
+                    java.time.Duration.between(it, LocalDateTime.now()).toMinutes()
+                } ?: Long.MAX_VALUE
+                val cooldownMin = cooldowns["DEVICE_DAILY_EXCEEDED"] ?: 360L
+                if (minutesSince >= cooldownMin) {
+                    val name = dev.label?.takeIf { it.isNotBlank() }
+                        ?: dev.hostname?.takeIf { it.isNotBlank() } ?: dev.mac
+                    repo.insertAlert(AlertEntity(
+                        ts = nowIso,
+                        reason = "DEVICE_DAILY_EXCEEDED",
+                        valueMb = usedMb,
+                        sentOk = 1,
+                        error = "$name|${dev.mac}|cap=${cap}MB"
+                    ))
+                    Notifier.fire(context, "DEVICE_DAILY_EXCEEDED", usedMb, "$name over ${cap} MB today")
+                    fired += "DEVICE_DAILY_EXCEEDED:${dev.mac}"
+                }
+            }
         }
 
         return fired

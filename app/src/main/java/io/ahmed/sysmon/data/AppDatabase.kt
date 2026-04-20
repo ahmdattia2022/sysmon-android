@@ -29,7 +29,7 @@ import io.ahmed.sysmon.data.entity.UsageSampleEntity
         LogEntry::class,
         BundleCycleEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
