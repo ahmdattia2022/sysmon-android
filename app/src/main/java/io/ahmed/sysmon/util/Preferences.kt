@@ -60,6 +60,15 @@ class Preferences(context: Context) {
         get() = prefs.getBoolean(K_EMAIL, false)
         set(v) { prefs.edit().putBoolean(K_EMAIL, v).apply() }
 
+    /**
+     * MAC of the phone running this app. Used by control actions to refuse
+     * self-throttle / self-block operations that would cut off polling.
+     * User enters it once in Settings (or from the Actions tab "Identify me").
+     */
+    var selfMac: String
+        get() = prefs.getString(K_SELF_MAC, "") ?: ""
+        set(v) { prefs.edit().putString(K_SELF_MAC, v.trim().lowercase()).apply() }
+
     /** Whether the user is "logged in" — any poll attempt proceeds iff this is true. */
     var loggedIn: Boolean
         get() = prefs.getBoolean(K_LOGGED, false)
@@ -92,6 +101,7 @@ class Preferences(context: Context) {
         private const val K_RT_HOURLY = "router_hourly_mb"
         private const val K_RT_DAILY = "router_daily_mb"
         private const val K_EMAIL = "email_enabled"
+        private const val K_SELF_MAC = "self_mac"
         private const val K_LOGGED = "logged_in"
         private const val K_SESSION = "session_cookie"
         private const val K_SESSION_TS = "session_established_at"

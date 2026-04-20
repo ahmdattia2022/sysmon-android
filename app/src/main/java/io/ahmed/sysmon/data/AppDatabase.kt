@@ -5,6 +5,7 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import io.ahmed.sysmon.data.dao.AlertDao
+import io.ahmed.sysmon.data.dao.BlockScheduleDao
 import io.ahmed.sysmon.data.dao.BundleCycleDao
 import io.ahmed.sysmon.data.dao.DeviceDao
 import io.ahmed.sysmon.data.dao.DeviceUsageDao
@@ -12,6 +13,7 @@ import io.ahmed.sysmon.data.dao.JobDao
 import io.ahmed.sysmon.data.dao.LogDao
 import io.ahmed.sysmon.data.dao.UsageSampleDao
 import io.ahmed.sysmon.data.entity.AlertEntity
+import io.ahmed.sysmon.data.entity.BlockScheduleEntity
 import io.ahmed.sysmon.data.entity.BundleCycleEntity
 import io.ahmed.sysmon.data.entity.DeviceEntity
 import io.ahmed.sysmon.data.entity.DeviceUsageEntity
@@ -27,9 +29,10 @@ import io.ahmed.sysmon.data.entity.UsageSampleEntity
         JobEntity::class,
         DeviceUsageEntity::class,
         LogEntry::class,
-        BundleCycleEntity::class
+        BundleCycleEntity::class,
+        BlockScheduleEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -40,6 +43,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun deviceUsageDao(): DeviceUsageDao
     abstract fun logDao(): LogDao
     abstract fun bundleCycleDao(): BundleCycleDao
+    abstract fun blockScheduleDao(): BlockScheduleDao
 
     companion object {
         @Volatile private var INSTANCE: AppDatabase? = null

@@ -22,10 +22,18 @@ import kotlinx.coroutines.launch
 
 private val DEFAULT_GROUPS = listOf("Parents", "Kids", "Work", "IoT", "Guest")
 
+data class DeviceActionBinding(
+    val onBlock: suspend (blocked: Boolean) -> Unit,
+    val onApplyQos: suspend (downKbps: Int, upKbps: Int) -> Unit,
+    val onAddSchedule: suspend (daysMask: Int, startMin: Int, endMin: Int) -> Unit,
+    val isSelfMac: Boolean
+)
+
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun DeviceEditSheet(
     device: DeviceEntity,
+    actions: DeviceActionBinding? = null,
     onDismiss: () -> Unit,
     onSave: suspend (label: String?, group: String?, iconKind: String?, dailyBudgetMb: Int?, monthlyBudgetMb: Int?) -> Unit
 ) {
@@ -139,6 +147,114 @@ fun DeviceEditSheet(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
+
+            if (actions != null) {
+                HorizontalDivider()
+                Text("Router control", style = MaterialTheme.typography.titleSmall)
+                if (actions.isSelfMac) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        shape = MaterialTheme.shapes.medium
+                    ) {
+                        Text(
+                            "This phone (self-MAC). Block / throttle is disabled " +
+                                "— it would disconnect the app from the router.",
+                            modifier = Modifier.padding(10.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+                var busy by remember { mutableStateOf(false) }
+                var actionResult by remember { mutableStateOf<String?>(null) }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(
+                        enabled = !actions.isSelfMac && !busy,
+                        onClick = {
+                            scope.launch {
+                                busy = true
+                                runCatching { actions.onBlock(true) }
+                                    .onSuccess { actionResult = "Blocked ✓" }
+                                    .onFailure { actionResult = "Block failed: ${it.message}" }
+                                busy = false
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Block") }
+                    OutlinedButton(
+                        enabled = !busy,
+                        onClick = {
+                            scope.launch {
+                                busy = true
+                                runCatching { actions.onBlock(false) }
+                                    .onSuccess { actionResult = "Unblocked ✓" }
+                                    .onFailure { actionResult = "Unblock failed: ${it.message}" }
+                                busy = false
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Unblock") }
+                }
+
+                Text("Bandwidth limit", style = MaterialTheme.typography.titleSmall)
+                val presets = listOf(
+                    Triple("Slow", 512, 256),
+                    Triple("Normal", 5120, 1024),
+                    Triple("Unlimited", 0, 0)
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    for ((name, down, up) in presets) {
+                        OutlinedButton(
+                            enabled = !busy && !(actions.isSelfMac && down in 1..127),
+                            onClick = {
+                                scope.launch {
+                                    busy = true
+                                    runCatching { actions.onApplyQos(down, up) }
+                                        .onSuccess { actionResult = "$name applied ↓$down ↑$up kbps ✓" }
+                                        .onFailure { actionResult = "QoS failed: ${it.message}" }
+                                    busy = false
+                                }
+                            }
+                        ) {
+                            Text(if (down == 0) name else "$name (↓$down/↑$up)")
+                        }
+                    }
+                }
+
+                var showScheduleDialog by remember { mutableStateOf(false) }
+                OutlinedButton(
+                    enabled = !actions.isSelfMac && !busy,
+                    onClick = { showScheduleDialog = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Add block schedule…") }
+
+                if (showScheduleDialog) {
+                    BlockScheduleDialog(
+                        deviceName = device.label ?: device.hostname ?: device.mac,
+                        onDismiss = { showScheduleDialog = false },
+                        onConfirm = { days, start, end ->
+                            scope.launch {
+                                busy = true
+                                runCatching { actions.onAddSchedule(days, start, end) }
+                                    .onSuccess { actionResult = "Schedule added ✓" }
+                                    .onFailure { actionResult = "Schedule failed: ${it.message}" }
+                                busy = false
+                            }
+                            showScheduleDialog = false
+                        }
+                    )
+                }
+
+                actionResult?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall,
+                         color = MaterialTheme.colorScheme.secondary)
+                }
+            }
 
             Spacer(Modifier.height(4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {

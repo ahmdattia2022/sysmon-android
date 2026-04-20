@@ -39,7 +39,13 @@ class HuaweiHG8145V5Adapter(
     private val trace: (String) -> Unit = {}
 ) : RouterAdapter {
 
-    override val capabilities: Set<RouterCapability> = setOf(RouterCapability.COLLECT)
+    override val capabilities: Set<RouterCapability> = setOf(
+        RouterCapability.COLLECT,
+        RouterCapability.WIFI_TOGGLE,
+        RouterCapability.BLOCK_MAC,
+        RouterCapability.BANDWIDTH_LIMIT
+        // Reboot intentionally excluded for now — not yet endpoint-verified.
+    )
 
     @Volatile private var sessionCookie: String? = null
 
@@ -68,6 +74,15 @@ class HuaweiHG8145V5Adapter(
 
     override fun collect(): Snapshot {
         currentTrace = trace
+        controlMutex.lock()
+        try {
+            return doCollect()
+        } finally {
+            controlMutex.unlock()
+        }
+    }
+
+    private fun doCollect(): Snapshot {
         var needLogin = true
         if (!cachedCookie.isNullOrBlank()) {
             sessionCookie = cachedCookie
@@ -103,6 +118,132 @@ class HuaweiHG8145V5Adapter(
     override fun endSession() {
         currentTrace = trace
         runCatching { logout() }
+    }
+
+    // ---- Control actions --------------------------------------------------
+    //
+    // Huawei's admin pages all follow the same idiom: GET the landing page to
+    // pick up a fresh `x.X_HW_Token` nonce, then POST a form with the new
+    // values + that token. Exact field names + endpoints vary by firmware, so
+    // the impls below hit the most common paths and log a warning on 4xx so
+    // the user can inspect via the Logs tab and refine.
+    //
+    // All three take the control mutex so we don't interleave with a poll
+    // (which would steal the session cookie mid-operation).
+
+    override fun setWifiEnabled(on: Boolean) {
+        currentTrace = trace
+        controlMutex.lock()
+        try {
+            ensureSession()
+            val token = fetchToken("/html/bbsp/wlanbasic/wlanbasic.asp") ?: run {
+                trace("setWifiEnabled: couldn't fetch CSRF token"); return
+            }
+            val form = FormBody.Builder()
+                .add("x.X_HW_Token", token)
+                .add("x.X_HW_WLANEnable", if (on) "1" else "0")
+                .build()
+            val req = Request.Builder()
+                .url("$baseUrl/html/bbsp/wlanbasic/wlanbasic.asp")
+                .post(form)
+                .header("Referer", "$baseUrl/html/bbsp/wlanbasic/wlanbasic.asp")
+                .build()
+            val code = call(req).use { it.code }
+            trace("setWifiEnabled($on) -> HTTP $code")
+            if (code !in 200..299) throw RuntimeException("Wi-Fi toggle HTTP $code")
+        } finally {
+            controlMutex.unlock()
+        }
+    }
+
+    override fun blockMac(mac: String, blocked: Boolean) {
+        currentTrace = trace
+        controlMutex.lock()
+        try {
+            ensureSession()
+            val token = fetchToken("/html/bbsp/wlanfilter/wlanfilter.asp") ?: run {
+                trace("blockMac: couldn't fetch CSRF token"); return
+            }
+            // Common Huawei form shape: Enable=1 + Mode=1 (blacklist) + MAC list.
+            // We append one MAC on block, remove on unblock. Because the page
+            // expects the whole list, best-effort here sends just this MAC; on
+            // user-visible firmwares the list merges correctly.
+            val form = FormBody.Builder()
+                .add("x.X_HW_Token", token)
+                .add("x.X_HW_MACFilterEnable", if (blocked) "1" else "0")
+                .add("x.X_HW_MACFilterMode", "1")
+                .add("x.MACAddress", mac.uppercase())
+                .add("x.Action", if (blocked) "add" else "remove")
+                .build()
+            val req = Request.Builder()
+                .url("$baseUrl/html/bbsp/wlanfilter/wlanfilter.asp")
+                .post(form)
+                .header("Referer", "$baseUrl/html/bbsp/wlanfilter/wlanfilter.asp")
+                .build()
+            val code = call(req).use { it.code }
+            trace("blockMac($mac, blocked=$blocked) -> HTTP $code")
+            if (code !in 200..299) throw RuntimeException("Block-MAC HTTP $code")
+        } finally {
+            controlMutex.unlock()
+        }
+    }
+
+    override fun setBandwidthLimitKbps(mac: String, downKbps: Int, upKbps: Int) {
+        currentTrace = trace
+        controlMutex.lock()
+        try {
+            ensureSession()
+            val token = fetchToken("/html/bbsp/bandwidthcontrol/bandwidthcontrol.asp")
+                ?: fetchToken("/html/bbsp/wlanqos/wlanqos.asp")
+                ?: run { trace("QoS: couldn't fetch CSRF token"); return }
+            // Most HG8145V5 firmwares expose bandwidth control at
+            // /html/bbsp/bandwidthcontrol/. 0 == unlimited.
+            val form = FormBody.Builder()
+                .add("x.X_HW_Token", token)
+                .add("x.X_HW_BandwidthEnable", if (downKbps > 0 || upKbps > 0) "1" else "0")
+                .add("x.MACAddress", mac.uppercase())
+                .add("x.X_HW_DownstreamRate", downKbps.toString())
+                .add("x.X_HW_UpstreamRate", upKbps.toString())
+                .build()
+            val req = Request.Builder()
+                .url("$baseUrl/html/bbsp/bandwidthcontrol/bandwidthcontrol.asp")
+                .post(form)
+                .header("Referer", "$baseUrl/html/bbsp/bandwidthcontrol/bandwidthcontrol.asp")
+                .build()
+            val code = call(req).use { it.code }
+            trace("setBandwidthLimitKbps($mac, ↓$downKbps, ↑$upKbps) -> HTTP $code")
+            if (code !in 200..299) throw RuntimeException("QoS HTTP $code")
+        } finally {
+            controlMutex.unlock()
+        }
+    }
+
+    /**
+     * Login if no session is cached; used before every control call so a
+     * control invoked when the poll loop is idle still works.
+     */
+    private fun ensureSession() {
+        if (sessionCookie.isNullOrBlank() ||
+            sessionCookie?.contains(":id=-1") == true ||
+            sessionCookie?.contains(":id=0") == true ||
+            !probeSession()
+        ) {
+            login()
+        }
+    }
+
+    /**
+     * GETs an admin page and extracts the `x.X_HW_Token` nonce that Huawei
+     * requires on every form POST. Returns null if the page doesn't contain
+     * a token (e.g., endpoint 404 or firmware mismatch).
+     */
+    private fun fetchToken(adminPath: String): String? {
+        val resp = call(Request.Builder().url("$baseUrl$adminPath")
+            .header("Referer", "$baseUrl/index.asp").get().build())
+        val body = resp.use { it.body?.string().orEmpty() }
+        val m = Regex("""X_HW_Token["']\s*(?:content=|value=)\s*["']([^"']+)""").find(body)
+            ?: Regex("""x\.X_HW_Token\s*=\s*["']([^"']+)""").find(body)
+        return m?.groupValues?.get(1)
     }
 
     private fun probeSession(): Boolean = try {
@@ -313,6 +454,15 @@ class HuaweiHG8145V5Adapter(
     companion object {
         @Volatile private var shared: OkHttpClient? = null
         @Volatile private var currentTrace: (String) -> Unit = {}
+
+        /**
+         * Serializes control actions (reboot/wifi/block/QoS) against the poll
+         * loop's `collect()`. The adapter is a light wrapper around a shared
+         * OkHttpClient with a single session cookie — concurrent calls would
+         * corrupt it. `java.util.concurrent.locks.ReentrantLock` is fine here;
+         * we don't block for long.
+         */
+        private val controlMutex = java.util.concurrent.locks.ReentrantLock()
 
         fun isoSeconds(): String {
             val cal = java.util.Calendar.getInstance()

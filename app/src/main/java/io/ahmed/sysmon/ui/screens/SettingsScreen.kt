@@ -15,6 +15,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import io.ahmed.sysmon.data.entity.AlertEntity
 import io.ahmed.sysmon.data.entity.BundleCycleEntity
 import io.ahmed.sysmon.repo.Repository
 import io.ahmed.sysmon.service.RouterPollService
@@ -22,9 +23,11 @@ import io.ahmed.sysmon.service.bundle.SmsParsers
 import io.ahmed.sysmon.service.router.RouterAdapters
 import io.ahmed.sysmon.service.router.RouterKind
 import io.ahmed.sysmon.ui.components.PasswordField
+import io.ahmed.sysmon.util.Logger
 import io.ahmed.sysmon.util.Validate
 import io.ahmed.sysmon.util.WifiNetworkBinder
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.LocalDateTime
@@ -61,6 +64,13 @@ fun SettingsScreen(onLoggedOut: () -> Unit = {}) {
     val rtHourlyErr = Validate.positiveInt(routerHourlyMb, "Router hourly limit")
     val rtDailyErr = Validate.positiveInt(routerDailyMb, "Router daily limit")
     val formValid = listOf(baseErr, userErr, passErr, bundleErr, hourlyErr, rtHourlyErr, rtDailyErr).all { it == null }
+
+    // --- Router-control section state -------------------------------------
+    var selfMac by remember { mutableStateOf(repo.prefs.selfMac) }
+    var wifiToggleConfirm by remember { mutableStateOf(false) }
+    var wifiArmed by remember { mutableStateOf(false) }
+    var wifiBusy by remember { mutableStateOf(false) }
+    var wifiResult by remember { mutableStateOf<String?>(null) }
 
     // --- Bundle cycle section state ---------------------------------------
     var freshGb by remember { mutableStateOf("140") }
@@ -192,6 +202,104 @@ fun SettingsScreen(onLoggedOut: () -> Unit = {}) {
         if (saved) Text("Saved ✓",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.secondary)
+
+        // ================================================================
+        //  Router control
+        // ================================================================
+        HorizontalDivider()
+        SectionHeader("Router control")
+
+        OutlinedTextField(
+            value = selfMac, onValueChange = { selfMac = it },
+            label = { Text("This phone's MAC (self)") },
+            supportingText = {
+                Text("Prevents the app from accidentally blocking or throttling itself. " +
+                     "Format: AA:BB:CC:DD:EE:FF")
+            },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedButton(
+            enabled = selfMac.isNotBlank() && (Validate.mac(selfMac) == null),
+            onClick = { repo.prefs.selfMac = selfMac },
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Save self-MAC") }
+
+        // Wi-Fi toggle — with big warning + 3-second arm to prevent tap-through.
+        Surface(
+            color = MaterialTheme.colorScheme.errorContainer,
+            shape = MaterialTheme.shapes.medium,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Turn off router Wi-Fi",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    "Disconnects EVERY Wi-Fi client — including this phone — immediately. " +
+                        "You'll need to turn Wi-Fi back on via the router's physical button. " +
+                        "Only do this if you're already connected via a different network (e.g. mobile data).",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer
+                )
+                if (!wifiArmed) {
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                wifiArmed = true
+                                delay(3_000)
+                                wifiArmed = false
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Arm toggle (3s)") }
+                } else {
+                    Button(
+                        enabled = !wifiBusy,
+                        onClick = {
+                            scope.launch {
+                                wifiBusy = true
+                                withContext(Dispatchers.IO) {
+                                    runCatching {
+                                        val adapter = RouterAdapters.forKind(
+                                            kind = RouterKind.fromPref(repo.prefs.routerKind),
+                                            baseUrl = repo.prefs.routerBase,
+                                            username = repo.prefs.routerUser,
+                                            password = repo.prefs.routerPassword,
+                                            cachedCookie = repo.prefs.sessionCookie.takeIf { it.isNotBlank() },
+                                            onSessionEstablished = { sid -> repo.prefs.sessionCookie = sid },
+                                            trace = { line -> Logger.i(context, "action", line) }
+                                        )
+                                        WifiNetworkBinder.withWifiProcess(context) {
+                                            adapter.setWifiEnabled(false)
+                                        } ?: adapter.setWifiEnabled(false)
+                                        repo.insertAlert(AlertEntity(
+                                            ts = nowIso(),
+                                            reason = "ACTION",
+                                            valueMb = 0.0,
+                                            sentOk = 1,
+                                            error = "wifi off"
+                                        ))
+                                    }.onSuccess { wifiResult = "Wi-Fi off request sent ✓" }
+                                        .onFailure { wifiResult = "Failed: ${it.message}" }
+                                }
+                                wifiBusy = false
+                                wifiArmed = false
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text(if (wifiBusy) "Sending…" else "Confirm: turn Wi-Fi OFF now") }
+                }
+            }
+        }
+        wifiResult?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall,
+                 color = MaterialTheme.colorScheme.secondary)
+        }
 
         // ================================================================
         //  Bundle cycle

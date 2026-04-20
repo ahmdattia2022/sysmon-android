@@ -5,6 +5,7 @@ import io.ahmed.sysmon.repo.Repository
 import io.ahmed.sysmon.service.DailyReportWorker
 import io.ahmed.sysmon.service.Notifier
 import io.ahmed.sysmon.service.RouterPollService
+import io.ahmed.sysmon.service.ScheduleEnforcer
 
 class SysmonApp : Application() {
     override fun onCreate() {
@@ -17,6 +18,9 @@ class SysmonApp : Application() {
         if (prefs.loggedIn) {
             RouterPollService.start(this)
             DailyReportWorker.schedule(this)
+            // Re-book every enabled block schedule at its next boundary. Safe to
+            // call even when there are no schedules yet (no-op).
+            ScheduleEnforcer.rescheduleAll(this)
         }
     }
 }

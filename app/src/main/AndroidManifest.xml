@@ -52,5 +52,12 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!-- Receives AlarmManager callbacks fired by ScheduleEnforcer at
+             the start / end of each parental-schedule window. Not exported. -->
+        <receiver
+            android:name=".service.ScheduleReceiver"
+            android:enabled="true"
+            android:exported="false" />
     </application>
 </manifest>

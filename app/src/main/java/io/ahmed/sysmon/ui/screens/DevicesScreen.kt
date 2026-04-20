@@ -24,17 +24,27 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.ahmed.sysmon.data.entity.AlertEntity
+import io.ahmed.sysmon.data.entity.BlockScheduleEntity
 import io.ahmed.sysmon.data.entity.DeviceEntity
 import io.ahmed.sysmon.repo.Repository
 import io.ahmed.sysmon.service.RouterPollService
+import io.ahmed.sysmon.service.ScheduleEnforcer
+import io.ahmed.sysmon.service.router.RouterAdapters
+import io.ahmed.sysmon.service.router.RouterKind
+import io.ahmed.sysmon.ui.components.DeviceActionBinding
 import io.ahmed.sysmon.ui.components.DeviceEditSheet
 import io.ahmed.sysmon.ui.components.DeviceIconKind
 import io.ahmed.sysmon.util.Format
+import io.ahmed.sysmon.util.Logger
+import io.ahmed.sysmon.util.WifiNetworkBinder
 import io.ahmed.sysmon.util.rememberToday
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -172,8 +182,72 @@ fun DevicesScreen(onOpenDevice: (String) -> Unit = {}) {
     }
 
     editing?.let { dev ->
+        val selfMac = repo.prefs.selfMac
+        val actions = DeviceActionBinding(
+            isSelfMac = selfMac.isNotBlank() && selfMac.equals(dev.mac, ignoreCase = true),
+            onBlock = { blocked ->
+                withContext(Dispatchers.IO) {
+                    val adapter = RouterAdapters.forKind(
+                        kind = RouterKind.fromPref(repo.prefs.routerKind),
+                        baseUrl = repo.prefs.routerBase,
+                        username = repo.prefs.routerUser,
+                        password = repo.prefs.routerPassword,
+                        cachedCookie = repo.prefs.sessionCookie.takeIf { it.isNotBlank() },
+                        onSessionEstablished = { sid -> repo.prefs.sessionCookie = sid },
+                        trace = { line -> Logger.i(context, "action", line) }
+                    )
+                    WifiNetworkBinder.withWifiProcess(context) { adapter.blockMac(dev.mac, blocked) }
+                        ?: adapter.blockMac(dev.mac, blocked)
+                    repo.insertAlert(AlertEntity(
+                        ts = nowIso(),
+                        reason = "ACTION",
+                        valueMb = 0.0,
+                        sentOk = 1,
+                        error = "${if (blocked) "block" else "unblock"} ${dev.mac}"
+                    ))
+                }
+            },
+            onApplyQos = { down, up ->
+                withContext(Dispatchers.IO) {
+                    val adapter = RouterAdapters.forKind(
+                        kind = RouterKind.fromPref(repo.prefs.routerKind),
+                        baseUrl = repo.prefs.routerBase,
+                        username = repo.prefs.routerUser,
+                        password = repo.prefs.routerPassword,
+                        cachedCookie = repo.prefs.sessionCookie.takeIf { it.isNotBlank() },
+                        onSessionEstablished = { sid -> repo.prefs.sessionCookie = sid },
+                        trace = { line -> Logger.i(context, "action", line) }
+                    )
+                    WifiNetworkBinder.withWifiProcess(context) {
+                        adapter.setBandwidthLimitKbps(dev.mac, down, up)
+                    } ?: adapter.setBandwidthLimitKbps(dev.mac, down, up)
+                    repo.insertAlert(AlertEntity(
+                        ts = nowIso(),
+                        reason = "ACTION",
+                        valueMb = 0.0,
+                        sentOk = 1,
+                        error = "qos ${dev.mac} ↓$down ↑$up kbps"
+                    ))
+                }
+            },
+            onAddSchedule = { daysMask, startMin, endMin ->
+                withContext(Dispatchers.IO) {
+                    repo.schedules.insert(BlockScheduleEntity(
+                        mac = dev.mac,
+                        daysOfWeekMask = daysMask,
+                        startMinuteOfDay = startMin,
+                        endMinuteOfDay = endMin,
+                        enabled = 1,
+                        note = "per-device"
+                    ))
+                }
+                ScheduleEnforcer.rescheduleAll(context)
+            }
+        )
+
         DeviceEditSheet(
             device = dev,
+            actions = actions,
             onDismiss = { editing = null },
             onSave = { label, group, iconKind, dailyBudgetMb, monthlyBudgetMb ->
                 withContext(Dispatchers.IO) {
@@ -183,6 +257,9 @@ fun DevicesScreen(onOpenDevice: (String) -> Unit = {}) {
         )
     }
 }
+
+private fun nowIso(): String =
+    LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"))
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable

@@ -21,6 +21,7 @@ class Repository(context: Context) {
     val deviceUsage = db.deviceUsageDao()
     val logs = db.logDao()
     val cycles = db.bundleCycleDao()
+    val schedules = db.blockScheduleDao()
     val prefs = Preferences(context)
 
     suspend fun insertSample(s: UsageSampleEntity) = usage.insert(s)
