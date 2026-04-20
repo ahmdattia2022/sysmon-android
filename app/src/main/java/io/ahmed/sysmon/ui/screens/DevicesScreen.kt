@@ -31,6 +31,7 @@ import io.ahmed.sysmon.repo.Repository
 import io.ahmed.sysmon.service.RouterPollService
 import io.ahmed.sysmon.service.ScheduleEnforcer
 import io.ahmed.sysmon.service.router.RouterAdapters
+import io.ahmed.sysmon.service.router.RouterCapability
 import io.ahmed.sysmon.service.router.RouterKind
 import io.ahmed.sysmon.ui.components.DeviceActionBinding
 import io.ahmed.sysmon.ui.components.DeviceEditSheet
@@ -182,8 +183,24 @@ fun DevicesScreen(onOpenDevice: (String) -> Unit = {}) {
     }
 
     editing?.let { dev ->
+        // Control actions (block / QoS / schedule) are only surfaced when the
+        // selected RouterAdapter reports the matching capabilities. On
+        // WE-branded Huawei firmware the standard `admin` user sees 404 on
+        // /html/bbsp/wlanfilter/... and /html/bbsp/bandwidthcontrol/..., so
+        // our adapter currently advertises only COLLECT. The edit sheet falls
+        // back to identity-only mode in that case — no misleading buttons.
+        val caps = remember(repo.prefs.routerKind) {
+            RouterAdapters.forKind(
+                kind = RouterKind.fromPref(repo.prefs.routerKind),
+                baseUrl = repo.prefs.routerBase,
+                username = repo.prefs.routerUser,
+                password = repo.prefs.routerPassword
+            ).capabilities
+        }
+        val hasControls = RouterCapability.BLOCK_MAC in caps ||
+            RouterCapability.BANDWIDTH_LIMIT in caps
         val selfMac = repo.prefs.selfMac
-        val actions = DeviceActionBinding(
+        val actions: DeviceActionBinding? = if (!hasControls) null else DeviceActionBinding(
             isSelfMac = selfMac.isNotBlank() && selfMac.equals(dev.mac, ignoreCase = true),
             onBlock = { blocked ->
                 withContext(Dispatchers.IO) {

@@ -40,11 +40,14 @@ class HuaweiHG8145V5Adapter(
 ) : RouterAdapter {
 
     override val capabilities: Set<RouterCapability> = setOf(
-        RouterCapability.COLLECT,
-        RouterCapability.WIFI_TOGGLE,
-        RouterCapability.BLOCK_MAC,
-        RouterCapability.BANDWIDTH_LIMIT
-        // Reboot intentionally excluded for now — not yet endpoint-verified.
+        RouterCapability.COLLECT
+        // Other caps (reboot / Wi-Fi toggle / block / QoS) are kept in code
+        // but not advertised. On WE-branded firmware, /html/bbsp/wlanfilter/ and
+        // /html/bbsp/bandwidthcontrol/ return HTTP 404 to the standard `admin`
+        // user; these endpoints are only exposed to `telecomadmin`. Until we
+        // either (a) capture the real admin page HTML or (b) let the user
+        // enter super-admin credentials, we won't lie to the UI about what we
+        // can do.
     )
 
     @Volatile private var sessionCookie: String? = null
@@ -233,17 +236,46 @@ class HuaweiHG8145V5Adapter(
     }
 
     /**
-     * GETs an admin page and extracts the `x.X_HW_Token` nonce that Huawei
-     * requires on every form POST. Returns null if the page doesn't contain
-     * a token (e.g., endpoint 404 or firmware mismatch).
+     * GETs an admin page and extracts the CSRF nonce Huawei requires on every
+     * form POST. On HG8145V5 the token lives in a hidden input `<input
+     * type="hidden" id="onttoken" ... value="HEX">` (attribute order varies).
+     * The JS layer refers to it everywhere via `getValue('onttoken')`.
+     *
+     * Falls back to `/index.asp` — every authenticated page embeds the same
+     * token, so even if the specific admin endpoint is 404 on this firmware,
+     * we can still sign the subsequent POST.
      */
     private fun fetchToken(adminPath: String): String? {
-        val resp = call(Request.Builder().url("$baseUrl$adminPath")
+        tokenFromPath(adminPath)?.let { return it }
+        if (adminPath != "/index.asp") {
+            tokenFromPath("/index.asp")?.let { return it }
+        }
+        return null
+    }
+
+    private fun tokenFromPath(path: String): String? {
+        val resp = call(Request.Builder().url("$baseUrl$path")
             .header("Referer", "$baseUrl/index.asp").get().build())
         val body = resp.use { it.body?.string().orEmpty() }
-        val m = Regex("""X_HW_Token["']\s*(?:content=|value=)\s*["']([^"']+)""").find(body)
-            ?: Regex("""x\.X_HW_Token\s*=\s*["']([^"']+)""").find(body)
-        return m?.groupValues?.get(1)
+        // 1. Canonical: <input ... onttoken ... value="HEX" ...> (any attr order)
+        val tag = Regex("""<input[^>]*\bonttoken\b[^>]*>""", RegexOption.IGNORE_CASE).find(body)
+        if (tag != null) {
+            val v = Regex("""value\s*=\s*["']([^"']+)""", RegexOption.IGNORE_CASE)
+                .find(tag.value)?.groupValues?.get(1)
+            if (!v.isNullOrBlank()) return v
+        }
+        // 2. Inline JS assignments some pages use: var onttoken = "HEX";
+        Regex("""onttoken['"]?\s*[:=]\s*['"]([0-9a-fA-F]+)['"]""").find(body)
+            ?.groupValues?.get(1)?.let { return it }
+        // 3. Older token name retained just in case firmware changes it.
+        Regex("""X_HW_Token["']\s*(?:content=|value=)\s*["']([^"']+)""").find(body)
+            ?.groupValues?.get(1)?.let { return it }
+
+        // Give future debugging a fighting chance — log the first chunk of the
+        // page so a reader can spot the real token field name.
+        val preview = body.take(320).replace(Regex("""\s+"""), " ")
+        trace("fetchToken($path): no onttoken found; preview=$preview")
+        return null
     }
 
     private fun probeSession(): Boolean = try {

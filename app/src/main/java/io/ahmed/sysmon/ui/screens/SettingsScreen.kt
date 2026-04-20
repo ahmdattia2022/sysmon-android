@@ -21,6 +21,7 @@ import io.ahmed.sysmon.repo.Repository
 import io.ahmed.sysmon.service.RouterPollService
 import io.ahmed.sysmon.service.bundle.SmsParsers
 import io.ahmed.sysmon.service.router.RouterAdapters
+import io.ahmed.sysmon.service.router.RouterCapability
 import io.ahmed.sysmon.service.router.RouterKind
 import io.ahmed.sysmon.ui.components.PasswordField
 import io.ahmed.sysmon.util.Logger
@@ -186,6 +187,15 @@ fun SettingsScreen(onLoggedOut: () -> Unit = {}) {
         Button(
             enabled = formValid,
             onClick = {
+                // Detect changes that invalidate the router session — force a
+                // fresh login on the next poll so we don't carry stale cookies
+                // to a new URL / credential pair.
+                val creds = routerBase.trim().trimEnd('/') + "|" +
+                    routerUser.trim() + "|" + routerPass + "|" + kind.name
+                val prevCreds = repo.prefs.routerBase + "|" +
+                    repo.prefs.routerUser + "|" + repo.prefs.routerPassword +
+                    "|" + repo.prefs.routerKind
+
                 repo.prefs.routerKind = kind.name
                 repo.prefs.routerBase = routerBase.trim().trimEnd('/')
                 repo.prefs.routerUser = routerUser.trim()
@@ -195,19 +205,50 @@ fun SettingsScreen(onLoggedOut: () -> Unit = {}) {
                 repo.prefs.routerHourlyMbLimit = routerHourlyMb.toIntOrNull() ?: repo.prefs.routerHourlyMbLimit
                 repo.prefs.routerDailyMbLimit = routerDailyMb.toIntOrNull() ?: repo.prefs.routerDailyMbLimit
                 repo.prefs.emailEnabled = emailEnabled
+
+                if (creds != prevCreds) {
+                    repo.prefs.clearSession()
+                    Logger.i(context, "settings",
+                        "router creds / kind changed — session cookie cleared")
+                }
+                // Nudge the poll service so the change takes effect immediately
+                // instead of waiting up to 60s.
+                RouterPollService.requestRefresh()
+
                 saved = true
+                scope.launch { delay(2500); saved = false }
             }
         ) { Text("Save") }
 
-        if (saved) Text("Saved ✓",
+        if (saved) Text("Saved ✓ — refreshing with new settings…",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.secondary)
 
         // ================================================================
         //  Router control
         // ================================================================
+        val routerCaps = remember(kind) {
+            RouterAdapters.forKind(
+                kind = kind,
+                baseUrl = routerBase,
+                username = routerUser,
+                password = routerPass
+            ).capabilities
+        }
+        val canToggleWifi = RouterCapability.WIFI_TOGGLE in routerCaps
+
         HorizontalDivider()
         SectionHeader("Router control")
+        if (!canToggleWifi) {
+            Text(
+                "This router adapter doesn't expose write operations to the standard " +
+                    "admin user. Block / QoS / Wi-Fi toggle are hidden until we can " +
+                    "verify the endpoints on your firmware (or you sign in with " +
+                    "telecomadmin / admintelecom on WE).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
 
         OutlinedTextField(
             value = selfMac, onValueChange = { selfMac = it },
@@ -226,7 +267,7 @@ fun SettingsScreen(onLoggedOut: () -> Unit = {}) {
         ) { Text("Save self-MAC") }
 
         // Wi-Fi toggle — with big warning + 3-second arm to prevent tap-through.
-        Surface(
+        if (canToggleWifi) Surface(
             color = MaterialTheme.colorScheme.errorContainer,
             shape = MaterialTheme.shapes.medium,
             modifier = Modifier.fillMaxWidth()
@@ -299,6 +340,7 @@ fun SettingsScreen(onLoggedOut: () -> Unit = {}) {
         wifiResult?.let {
             Text(it, style = MaterialTheme.typography.bodySmall,
                  color = MaterialTheme.colorScheme.secondary)
+            LaunchedEffect(it) { delay(4000); wifiResult = null }
         }
 
         // ================================================================
