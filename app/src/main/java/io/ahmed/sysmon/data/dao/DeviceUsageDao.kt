@@ -14,14 +14,25 @@ interface DeviceUsageDao {
     @Insert
     suspend fun insertAll(rows: List<DeviceUsageEntity>): List<Long>
 
-    /** Today's total MB estimate per MAC. Reactive. */
+    /**
+     * Today's total MB estimate per MAC. Reactive. Excludes the `_gap_` sentinel
+     * row used by RouterPollService to track offline-window WAN bytes.
+     */
     @Query("""
         SELECT mac, COALESCE(SUM(deltaMb),0) AS total
         FROM device_usage
-        WHERE ts LIKE :dayPrefix || '%'
+        WHERE ts LIKE :dayPrefix || '%' AND mac != '_gap_'
         GROUP BY mac
     """)
     fun todaysPerDeviceFlow(dayPrefix: String): Flow<List<PerDevice>>
+
+    /** Today's total MB in the offline-gap sentinel (sum across all catch-up polls). */
+    @Query("""
+        SELECT COALESCE(SUM(deltaMb),0)
+        FROM device_usage
+        WHERE ts LIKE :dayPrefix || '%' AND mac = '_gap_'
+    """)
+    fun todaysGapMbFlow(dayPrefix: String): Flow<Double>
 
     @Query("SELECT COALESCE(SUM(deltaMb),0) FROM device_usage WHERE mac = :mac AND ts LIKE :dayPrefix || '%'")
     suspend fun mbOnDay(mac: String, dayPrefix: String): Double
@@ -65,11 +76,11 @@ interface DeviceUsageDao {
     """)
     fun hourlyForDeviceOnDay(mac: String, dayPrefix: String): Flow<List<HourlyTotal>>
 
-    /** Top-N devices by usage today (for dashboard strip). */
+    /** Top-N devices by usage today (for dashboard strip). Excludes `_gap_` sentinel. */
     @Query("""
         SELECT mac, COALESCE(SUM(deltaMb),0) AS total
         FROM device_usage
-        WHERE ts LIKE :dayPrefix || '%'
+        WHERE ts LIKE :dayPrefix || '%' AND mac != '_gap_'
         GROUP BY mac
         ORDER BY total DESC
         LIMIT :limit

@@ -111,8 +111,11 @@ class RouterPollService : Service() {
                     } else {
                         val err = status.exceptionOrNull()
                         val sig = "${err?.javaClass?.simpleName}: ${err?.message ?: ""}".take(120)
-                        // Don't spam alerts for repeat failures — only surface when signature changes
-                        if (sig != lastFailLogged) {
+                        // Suppress ROUTER_POLL_FAIL alerts while we're off home Wi-Fi —
+                        // the router is perfectly fine, we just can't reach it. Log still
+                        // captures the attempt so Logs tab stays complete.
+                        val onWifi = isOnWifi(applicationContext)
+                        if (sig != lastFailLogged && onWifi) {
                             lastFailLogged = sig
                             repo.insertAlert(AlertEntity(
                                 ts = now,
@@ -122,8 +125,9 @@ class RouterPollService : Service() {
                                 error = sig
                             ))
                         }
-                        Log.w(TAG, "poll failed: $sig", err)
-                        Logger.e(applicationContext, "poll", "failed", err)
+                        Log.w(TAG, "poll failed: $sig (onWifi=$onWifi)", err)
+                        Logger.e(applicationContext, "poll",
+                            if (onWifi) "failed" else "failed (off Wi-Fi — alert suppressed)", err)
                         "error: $sig"
                     }
                     repo.upsertJob(JobEntity(
@@ -192,21 +196,81 @@ class RouterPollService : Service() {
             if (delta < 0) null else (delta / (1024.0 * 1024.0))
         }
 
-        // Persist usage sample
-        repo.insertSample(UsageSampleEntity(
-            ts = snap.ts,
-            source = "router_wan",
-            rxBytes = snap.wanRxBytesTotal,
-            txBytes = snap.wanTxBytesTotal,
-            deltaMb = deltaMb?.let { round2(it) },
-            bootTime = null,
-            topProcesses = JSONArray().apply {
-                for (d in snap.devices) put(JSONObject()
-                    .put("mac", d.mac)
-                    .put("hostname", d.hostname)
-                    .put("ip", d.ip))
-            }.toString()
-        ))
+        // ---- Gap detection + backfill ----------------------------------------
+        // If the phone was off-Wi-Fi for a while, `prev.ts` will be much older
+        // than `snap.ts`. Storing the entire catch-up delta as a single sample at
+        // `snap.ts` would smash one hour's chart bucket. Instead we spread the MB
+        // uniformly across per-minute synthetic rows flagged backfilled=1.
+        val gapSec: Long = if (prev?.ts != null) {
+            runCatching {
+                val prevDt = java.time.LocalDateTime.parse(prev.ts)
+                val nowDt = java.time.LocalDateTime.parse(snap.ts)
+                java.time.Duration.between(prevDt, nowDt).seconds.coerceAtLeast(0)
+            }.getOrDefault(0)
+        } else 0L
+
+        val isCatchup = gapSec > GAP_THRESHOLD_SEC && deltaMb != null && deltaMb > 0
+        val topProcessesJson = JSONArray().apply {
+            for (d in snap.devices) put(JSONObject()
+                .put("mac", d.mac)
+                .put("hostname", d.hostname)
+                .put("ip", d.ip))
+        }.toString()
+
+        if (isCatchup && deltaMb != null) {
+            val minutes = (gapSec / 60L).toInt().coerceAtLeast(1)
+            val perMinuteMb = round2(deltaMb / minutes)
+            val prevDt = java.time.LocalDateTime.parse(prev!!.ts)
+            val nowDt = java.time.LocalDateTime.parse(snap.ts)
+            val tsFmt = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss")
+
+            val rows = (1..minutes).map { i ->
+                // Evenly-spaced timestamps between prev (exclusive) and now (inclusive).
+                val ts = prevDt.plusSeconds((gapSec * i / minutes))
+                    .format(tsFmt)
+                UsageSampleEntity(
+                    ts = ts,
+                    source = "router_wan",
+                    rxBytes = if (i == minutes) snap.wanRxBytesTotal else null,
+                    txBytes = if (i == minutes) snap.wanTxBytesTotal else null,
+                    deltaMb = perMinuteMb,
+                    bootTime = null,
+                    topProcesses = if (i == minutes) topProcessesJson else null,
+                    backfilled = 1
+                )
+            }
+            repo.usage.insertAll(rows)
+            Logger.i(ctx, "backfill",
+                "filled $minutes min × $perMinuteMb MB over ${gapSec}s offline gap " +
+                    "(${prev.ts} → ${snap.ts})")
+
+            // Device attribution is impossible during the gap — WAN delta is real but
+            // no per-device signal exists. Record one sentinel row so totals balance
+            // and the Devices screen can show an "Offline window" aggregate.
+            if (snap.devices.isNotEmpty()) {
+                repo.insertDeviceUsage(listOf(
+                    io.ahmed.sysmon.data.entity.DeviceUsageEntity(
+                        mac = GAP_MAC_SENTINEL,
+                        ts = snap.ts,
+                        deltaMb = round2(deltaMb),
+                        rxRateKbps = 0.0,
+                        txRateKbps = 0.0
+                    )
+                ))
+            }
+        } else {
+            // Normal single-sample insert.
+            repo.insertSample(UsageSampleEntity(
+                ts = snap.ts,
+                source = "router_wan",
+                rxBytes = snap.wanRxBytesTotal,
+                txBytes = snap.wanTxBytesTotal,
+                deltaMb = deltaMb?.let { round2(it) },
+                bootTime = null,
+                topProcesses = topProcessesJson,
+                backfilled = 0
+            ))
+        }
 
         // Upsert devices + mark anyone not seen as offline
         val seenMacs = snap.devices.map { it.mac }
@@ -224,6 +288,12 @@ class RouterPollService : Service() {
         if (seenMacs.isNotEmpty()) repo.markDevicesOfflineExcept(seenMacs)
 
         // Per-device attribution of the WAN delta — activity-delta heuristic.
+        // Skip during a catch-up poll — the gap sentinel row already covers it,
+        // and mixing real-time activity weights across a multi-minute window
+        // would produce misleading per-device history.
+        if (isCatchup) {
+            return
+        }
         //
         // Huawei HG8145V5 exposes only PHY link rate (rxRate/txRate) per
         // associated device. Those are the *negotiated* 802.11 MCS rates —
@@ -333,9 +403,26 @@ class RouterPollService : Service() {
 
     private fun round2(v: Double) = Math.round(v * 100.0) / 100.0
 
+    private fun isOnWifi(ctx: Context): Boolean {
+        return try {
+            val cm = ctx.getSystemService(android.net.ConnectivityManager::class.java)
+                ?: return false
+            val net = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(net) ?: return false
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+        } catch (_: Exception) { false }
+    }
+
     companion object {
         private const val TAG = "RouterPollService"
         private const val NOTIF_ID = 7312
+
+        /** Any poll-to-poll gap beyond this is treated as an offline window that
+         *  needs per-minute backfill rather than a single bloated sample. */
+        internal const val GAP_THRESHOLD_SEC = 180L
+
+        /** Sentinel MAC for the DeviceUsageEntity row that absorbs gap-window MB. */
+        internal const val GAP_MAC_SENTINEL = "_gap_"
 
         /** Shared across instances; a single send wakes the poll loop immediately. */
         @JvmStatic

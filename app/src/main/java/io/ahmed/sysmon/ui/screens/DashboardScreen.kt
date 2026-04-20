@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Refresh
@@ -89,6 +90,16 @@ fun DashboardScreen() {
     LaunchedEffect(sampleCount, cyclesList.size, cyclesList.firstOrNull()?.id) {
         bundleBalance = repo.bundleBalance()
     }
+
+    // Offline-gap catch-up: if the poll service backfilled samples in the last 6h,
+    // surface an amber chip so the user knows the spike isn't real-time traffic.
+    val sixHoursAgo = remember(sampleCount) {
+        LocalDateTime.now().minusHours(6).format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"))
+    }
+    val backfilledMb by repo.usage.sumBackfilledMbSinceFlow("router_wan", sixHoursAgo)
+        .collectAsStateWithLifecycle(0.0)
+    val backfilledCount by repo.usage.backfilledCountSinceFlow("router_wan", sixHoursAgo)
+        .collectAsStateWithLifecycle(0)
     // `tick` drove StatusCard's "Last poll · Xs ago" string refresh. Keep a low-
     // frequency tick so the relative time stays current without spamming CPU.
     var tick by remember { mutableLongStateOf(0L) }
@@ -146,6 +157,14 @@ fun DashboardScreen() {
                 lastFail = lastFail,
                 tick = tick
             )
+
+            AnimatedVisibility(
+                visible = backfilledCount > 0 && backfilledMb > 0,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
+            ) {
+                BackfillChip(mb = backfilledMb, minutes = backfilledCount)
+            }
 
             if (firstLaunch) {
                 SkeletonHero()
@@ -432,6 +451,47 @@ private fun HeroUsageCard(
 }
 
 private fun avgDailyMbForDisplay(mb: Double): Double = mb
+
+/**
+ * Amber chip shown when the poll service recently backfilled an offline window.
+ * Explains that the bars ahead of it in the hourly chart come from a single
+ * catch-up poll, not minute-by-minute real-time data.
+ */
+@Composable
+private fun BackfillChip(mb: Double, minutes: Int) {
+    Card(
+        modifier = Modifier.fillMaxWidth().animateContentSize(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.tertiaryContainer
+        ),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Icon(
+                Icons.Filled.CloudSync, null,
+                tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                modifier = Modifier.size(22.dp)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "Caught up ${Format.mb(mb)} from an offline window",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+                Text(
+                    "$minutes min of Wi-Fi-off traffic spread evenly across the gap",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.8f)
+                )
+            }
+        }
+    }
+}
 
 /**
  * Hero card driven by the active BundleCycleEntity + WAN usage since its start.

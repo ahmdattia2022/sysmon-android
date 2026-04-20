@@ -6,7 +6,7 @@ import androidx.room.PrimaryKey
 
 @Entity(
     tableName = "usage_samples",
-    indices = [Index(value = ["ts"]), Index(value = ["source", "ts"])]
+    indices = [Index(value = ["ts"]), Index(value = ["source", "ts"]), Index(value = ["backfilled"])]
 )
 data class UsageSampleEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -16,5 +16,7 @@ data class UsageSampleEntity(
     val txBytes: Long?,
     val deltaMb: Double?,
     val bootTime: String?,
-    val topProcesses: String?           // JSON string
+    val topProcesses: String?,          // JSON string
+    /** 1 if this row was synthesized to backfill a gap (phone off Wi-Fi); else 0. */
+    val backfilled: Int = 0
 )
